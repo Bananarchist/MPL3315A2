@@ -3,21 +3,18 @@ defmodule MPL3115A2 do
   import Bitwise
 
   @moduledoc """
-  Documentation for `Mpl3115a2`.
+  API for the `MPL3115A2` pressure/temperature/altitude sensor.
   """
 
-  @doc """
-  Hello world.
+  @type chip_state :: %{
+          ref: I2C.bus(),
+          addr: byte(),
+          sea_level_pressure: non_neg_integer
+        }
 
-  ## Examples
-
-      iex> Mpl3115a2.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
+  @i2c_code "i2c-1"
+  @chip_addr 0x60
+  @sea_level_pressure 101_326
 
   @addr_pressure_data 0x01
   @addr_altitude_data 0x01
@@ -30,73 +27,166 @@ defmodule MPL3115A2 do
   @register_1_ost 0x02
   @register_1_alt 0x80
 
+  @doc """
+  Initialize an MPL3115A2 sensor
+  
+  ## Parameters
+    - :i2c - the device code to pass to `I2C.open`
+    - :sea_level_pressure - the standard pressure at sea level in the sampling location, to calibrate altitude
+  """
+  @spec init(list()) :: chip_state | {:error, term()}
+  def init(opts \\ []) do
+    device = Keyword.get(opts, :i2c, @i2c_code)
+    sea_level_pressure = Keyword.get(opts, :sea_level_pressure, @sea_level_pressure)
+    case I2C.open(device) do
+      {:ok, ref} -> %{ref: ref, addr: @chip_addr, sea_level_pressure: sea_level_pressure}
+      err -> err
+    end
+  end
+
+  @doc """
+  Write to a given register
+
+  ## Parameters
+    - state - a `chip_state` as returned by `init`
+    - register - a register address (see MPL3115A2 specsheet)
+    - ctrl_bits - the modifiers to a register (see spec)
+  """
+  @spec write_to_register({:error, term()}) :: {:error, term()}
   def write_to_register({:error, str}), do: {:error, str}
 
-  def write_to_register(ref, addr, ctrl_bits) do
-    :ok = I2C.write(ref, 0x60, <<addr, ctrl_bits>>)
-    ref
+  @spec write_to_register(chip_state, non_neg_integer, binary) :: chip_state | {:error, term()}
+  def write_to_register(state, register, ctrl_bits) do
+    case I2C.write(state[:ref], state[:addr], <<register>> <> ctrl_bits) do
+      :ok -> state
+      err -> err
+    end
   end
 
-  def write_to_register(addr, ctrl_bits) do
-    {:ok, ref} = I2C.open("i2c-1")
+  @doc """
+  Set the primary control register
 
-    :ok = I2C.write(ref, 0x60, <<addr, ctrl_bits>>)
+  ## Parameters
+    - state - a `chip_state`
+    - ctrl_bits - binary data to send to register 1
+  """
+  @spec set_control_register_1({:error, term()}) :: {:error, term()}
+  def set_control_register_1({:error, str}), do: {:error, str}
 
-    ref
+  @spec set_control_register_1(chip_state, binary) :: chip_state | {:error, term()}
+  def set_control_register_1(state, ctrl_bits) do
+    write_to_register(state, @addr_register_1, ctrl_bits)
   end
 
-  def set_control_register_1(ctrl_bits) do
-    write_to_register(@addr_register_1, ctrl_bits)
-  end
+  @doc """
+  Convert a temperature reading to degrees celsius
 
+  ## Parameters
+    - reading - a binary as obtained from `read_data_out_register`
+  """
+  @spec temperature_reading_to_celsius(binary) :: float()
   def temperature_reading_to_celsius(data) do
     <<t_msb, t_lsb>> = data
     (t_msb <<< 8 ||| t_lsb) / 255
   end
 
+  @doc """
+  Convert an altitude reading to meters
+
+  ## Parameters
+    - reading - a binary as obtained from `read_data_out_register`
+  """
+  @spec altitude_reading_to_meters(binary) :: float()
   def altitude_reading_to_meters(data) do
     <<a_msb, a_csb, a_lsb>> = data
     (a_msb <<< 24 ||| a_csb <<< 16 ||| a_lsb <<< 8) / 65536
   end
 
+  @doc """
+  Convert a pressure reading to pascals
+
+  ## Parameters
+    - reading - a binary as obtained from `read_data_out_register`
+  """
+  @spec pressure_reading_to_pascals(binary) :: integer
   def pressure_reading_to_pascals(data) do
     <<p_msb, p_csb, p_lsb>> = data
-    (p_msb <<< 16 ||| p_csb <<< 8 ||| p_lsb) / 64
+    (p_msb <<< 16 ||| p_csb <<< 8 ||| p_lsb) >>> 6
   end
 
+  @doc """
+  Reads data from the output register
+
+  ## Parameters
+    - state: a `chip_state`
+    - register: the register to read from
+    - bytes: control parameters
+  """
+  @spec read_data_out_register({:error, term()}) :: {:error, term()}
   def read_data_out_register({:error, str}), do: {:error, str}
 
-  def read_data_out_register(ref, register, bytes) do
-    {:ok, out} = I2C.write_read(ref, 0x60, <<register>>, bytes)
-    out
-  end
-
-  def write_to_barometric_input({:error, str}, _), do: {:error, str}
-
-  def write_to_barometric_input(ref, pressure) do
-    input = pressure >>> 1
-
-    case I2C.write(ref, 0x60, <<@addr_barometric_input, input >>> 8, input &&& 0x00FF>>) do
-      :ok -> ref
-      _ -> {:error, "Failed to write to ref"}
+  @spec read_data_out_register(chip_state, non_neg_integer, non_neg_integer) ::
+          binary | {:error, term()}
+  def read_data_out_register(state, register, bytes) do
+    case I2C.write_read(state.ref, state.addr, <<register>>, bytes) do
+      {:ok, out} -> out
+      err -> err
     end
   end
 
-  def get_reading(:altitude),
+  @doc """
+  Write a value to the barometric input register to calibrate altitude readings
+
+  This uses the `sea_level_pressure` value of `chip_state`
+
+  ## Parameters
+    - state: a `chip_state`
+  """
+  @spec write_to_barometric_input({:error, term()}) :: {:error, term()}
+  def write_to_barometric_input({:error, str}, _), do: {:error, str}
+
+  @spec write_to_barometric_input(chip_state) :: chip_state | {:error, term()}
+  def write_to_barometric_input(state) do
+    input = state.sea_level_pressure >>> 1
+
+    case I2C.write(
+           state.ref,
+           state.addr,
+           <<@addr_barometric_input>> <> <<input >>> 8>> <> <<input &&& 0x00FF>>
+         ) do
+      :ok -> state
+      err -> err
+    end
+  end
+
+  @doc """
+  Get a reading. Values for `:altitude`, `:pressure` and `:temperature`. Pipe from
+  `init` to use non-default values (especially for setting pressure to read altitude)
+  """
+  def get_reading(:altitude), do: init() |> get_reading(:altitude)
+  def get_reading(:pressure), do: init() |> get_reading(:pressure)
+  def get_reading(:temperature), do: init() |> get_reading(:temperature)
+
+  def get_reading({:error, term}, _), do: {:error, term}
+  def get_reading(state, :altitude),
     do:
-      set_control_register_1(@register_1_ost ||| @register_1_alt)
+      state
+      |> write_to_barometric_input
+      |> set_control_register_1(<<@register_1_ost ||| @register_1_alt>>)
       |> read_data_out_register(@addr_altitude_data, 3)
       |> altitude_reading_to_meters
 
-  def get_reading(:pressure),
+  def get_reading(state, :pressure),
     do:
-      set_control_register_1(@register_1_ost)
+      state
+      |> set_control_register_1(<<@register_1_ost>>)
       |> read_data_out_register(@addr_pressure_data, 3)
       |> pressure_reading_to_pascals
 
-  def get_reading(:temperature),
+  def get_reading(state, :temperature),
     do:
-      set_control_register_1(@register_1_ost)
+      state
+      |> set_control_register_1(<<@register_1_ost>>)
       |> read_data_out_register(@addr_temperature_data, 2)
       |> temperature_reading_to_celsius
 end

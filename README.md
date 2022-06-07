@@ -1,6 +1,13 @@
-# Mpl3115a2
+# MPL3115A2
 
-**TODO: Add description**
+API for MPL3115A2 pressure/temperature/altitude sensor
+
+See implementations of various `get_reading` methods for idea of how to use
+more low level api to do advanced things.
+
+## Big ugly glitches
+
+At this time the first reading taken will always be nonsense
 
 ## Installation
 
